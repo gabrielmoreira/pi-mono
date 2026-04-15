@@ -584,6 +584,7 @@ async function finalizeExecutedToolCall(
 		);
 		if (afterResult) {
 			result = {
+				...result,
 				content: afterResult.content ?? result.content,
 				details: afterResult.details ?? result.details,
 			};

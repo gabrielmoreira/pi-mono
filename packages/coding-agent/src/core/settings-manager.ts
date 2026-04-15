@@ -43,6 +43,16 @@ export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
 }
 
+export interface DistillSettings {
+	enabled?: boolean; // default: false
+	model?: string; // Model id or provider/model id used for distill calls; defaults to the active session model
+	maxTokens?: number; // default: 2048
+	minOutputChars?: number; // default: 500 - skip distill for smaller outputs
+	display?: "raw" | "distilled" | "both"; // default: "distilled"
+	errorPrompt?: string; // default fallback prompt when _distill_on_error=true but _distill is missing
+	templates?: string[]; // Example prompts shown to the model in the system prompt when distill is enabled
+}
+
 export type TransportSetting = Transport;
 
 /**
@@ -95,6 +105,7 @@ export interface Settings {
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
+	distill?: DistillSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 }
 
@@ -675,6 +686,41 @@ export class SettingsManager {
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
 			maxDelayMs: this.settings.retry?.maxDelayMs ?? 60000,
 		};
+	}
+
+	getDistillSettings(): Required<
+		Pick<DistillSettings, "enabled" | "maxTokens" | "minOutputChars" | "display" | "errorPrompt">
+	> & {
+		model?: string;
+		templates: string[];
+	} {
+		return {
+			enabled: this.settings.distill?.enabled ?? false,
+			model: this.settings.distill?.model,
+			maxTokens: this.settings.distill?.maxTokens ?? 2048,
+			minOutputChars: this.settings.distill?.minOutputChars ?? 500,
+			display: this.settings.distill?.display ?? "distilled",
+			errorPrompt: this.settings.distill?.errorPrompt ?? "Summarize this error in 2 sentences: what failed and why.",
+			templates: [...(this.settings.distill?.templates ?? [])],
+		};
+	}
+
+	setDistillEnabled(enabled: boolean): void {
+		if (!this.globalSettings.distill) {
+			this.globalSettings.distill = {};
+		}
+		this.globalSettings.distill.enabled = enabled;
+		this.markModified("distill", "enabled");
+		this.save();
+	}
+
+	setDistillDisplay(display: "raw" | "distilled" | "both"): void {
+		if (!this.globalSettings.distill) {
+			this.globalSettings.distill = {};
+		}
+		this.globalSettings.distill.display = display;
+		this.markModified("distill", "display");
+		this.save();
 	}
 
 	getHideThinkingBlock(): boolean {

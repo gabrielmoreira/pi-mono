@@ -51,6 +51,8 @@ export interface SettingsConfig {
 	autocompleteMaxVisible: number;
 	quietStartup: boolean;
 	clearOnShrink: boolean;
+	distillEnabled: boolean;
+	distillDisplay: "raw" | "distilled" | "both";
 }
 
 export interface SettingsCallbacks {
@@ -75,6 +77,8 @@ export interface SettingsCallbacks {
 	onAutocompleteMaxVisibleChange: (maxVisible: number) => void;
 	onQuietStartupChange: (enabled: boolean) => void;
 	onClearOnShrinkChange: (enabled: boolean) => void;
+	onDistillEnabledChange: (enabled: boolean) => void;
+	onDistillDisplayChange: (display: "raw" | "distilled" | "both") => void;
 	onCancel: () => void;
 }
 
@@ -280,6 +284,20 @@ export class SettingsSelectorComponent extends Container {
 						},
 					),
 			},
+			{
+				id: "distill-enabled",
+				label: "Distill",
+				description: "Compress verbose tool output before it is returned to the session context",
+				currentValue: config.distillEnabled ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "distill-display",
+				label: "Distill display",
+				description: "How distilled tool results are rendered: distilled only, raw only, or both",
+				currentValue: config.distillDisplay,
+				values: ["distilled", "raw", "both"],
+			},
 		];
 
 		// Only show image toggle if terminal supports it
@@ -427,6 +445,12 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "clear-on-shrink":
 						callbacks.onClearOnShrinkChange(newValue === "true");
+						break;
+					case "distill-enabled":
+						callbacks.onDistillEnabledChange(newValue === "true");
+						break;
+					case "distill-display":
+						callbacks.onDistillDisplayChange(newValue as "raw" | "distilled" | "both");
 						break;
 				}
 			},

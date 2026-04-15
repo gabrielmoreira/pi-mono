@@ -3386,6 +3386,8 @@ export class InteractiveMode {
 					autocompleteMaxVisible: this.settingsManager.getAutocompleteMaxVisible(),
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
+					distillEnabled: this.settingsManager.getDistillSettings().enabled,
+					distillDisplay: this.settingsManager.getDistillSettings().display,
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -3487,6 +3489,12 @@ export class InteractiveMode {
 					onClearOnShrinkChange: (enabled) => {
 						this.settingsManager.setClearOnShrink(enabled);
 						this.ui.setClearOnShrink(enabled);
+					},
+					onDistillEnabledChange: (enabled) => {
+						this.settingsManager.setDistillEnabled(enabled);
+					},
+					onDistillDisplayChange: (display) => {
+						this.settingsManager.setDistillDisplay(display);
 					},
 					onCancel: () => {
 						done();

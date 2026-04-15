@@ -309,4 +309,46 @@ describe("SettingsManager", () => {
 			expect(manager.getSessionDir()).toBe("./sessions");
 		});
 	});
+	describe("distill settings", () => {
+		it("returns defaults when distill is not configured", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getDistillSettings()).toEqual({
+				enabled: false,
+				model: undefined,
+				maxTokens: 2048,
+				minOutputChars: 500,
+				display: "distilled",
+				errorPrompt: "Summarize this error in 2 sentences: what failed and why.",
+				templates: [],
+			});
+		});
+
+		it("loads configured distill settings", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					distill: {
+						enabled: true,
+						model: "openai/gpt-5-mini",
+						maxTokens: 512,
+						minOutputChars: 128,
+						display: "both",
+						errorPrompt: "Summarize this failure.",
+						templates: ["bash: return only errors"],
+					},
+				}),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getDistillSettings()).toEqual({
+				enabled: true,
+				model: "openai/gpt-5-mini",
+				maxTokens: 512,
+				minOutputChars: 128,
+				display: "both",
+				errorPrompt: "Summarize this failure.",
+				templates: ["bash: return only errors"],
+			});
+		});
+	});
 });

@@ -9,7 +9,14 @@ import {
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.js";
-import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
+import type {
+	AgentContext,
+	AgentEvent,
+	AgentLoopConfig,
+	AgentMessage,
+	AgentTool,
+	AgentToolResult,
+} from "../src/types.js";
 
 // Mock stream for testing - mimics MockAssistantStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -635,6 +642,76 @@ describe("agentLoop with AgentMessage", () => {
 		// Interrupt message should be in context when second LLM call is made
 		expect(sawInterruptInContext).toBe(true);
 	});
+});
+
+it("preserves afterToolCall metadata when overriding content", async () => {
+	const toolSchema = Type.Object({ value: Type.String() });
+	const tool: AgentTool<typeof toolSchema, { value: string }> = {
+		name: "echo",
+		label: "Echo",
+		description: "Echo tool",
+		parameters: toolSchema,
+		async execute(_toolCallId, params) {
+			return {
+				content: [{ type: "text", text: `raw: ${params.value}` }],
+				details: { value: params.value },
+			};
+		},
+	};
+
+	const context: AgentContext = {
+		systemPrompt: "",
+		messages: [],
+		tools: [tool],
+	};
+
+	const config: AgentLoopConfig = {
+		model: createModel(),
+		convertToLlm: identityConverter,
+		afterToolCall: async ({ result }) => {
+			(result as AgentToolResult<any> & { rawContent?: Array<{ type: string; text?: string }> }).rawContent = [
+				...result.content,
+			];
+			return { content: [{ type: "text", text: "distilled" }] };
+		},
+	};
+
+	let callIndex = 0;
+	const stream = agentLoop([createUserMessage("echo")], context, config, undefined, () => {
+		const mockStream = new MockAssistantStream();
+		queueMicrotask(() => {
+			if (callIndex === 0) {
+				mockStream.push({
+					type: "done",
+					reason: "toolUse",
+					message: createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+						"toolUse",
+					),
+				});
+			} else {
+				mockStream.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "done" }]),
+				});
+			}
+			callIndex++;
+		});
+		return mockStream;
+	});
+
+	const events: AgentEvent[] = [];
+	for await (const event of stream) {
+		events.push(event);
+	}
+
+	const toolEnd = events.find(
+		(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+	);
+	expect(toolEnd).toBeDefined();
+	expect(toolEnd?.result.content).toEqual([{ type: "text", text: "distilled" }]);
+	expect(toolEnd?.result.rawContent).toEqual([{ type: "text", text: "raw: hello" }]);
 });
 
 describe("agentLoopContinue with AgentMessage", () => {

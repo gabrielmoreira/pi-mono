@@ -21,10 +21,17 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	AgentToolCall,
 	ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@mariozechner/pi-ai";
-import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@mariozechner/pi-ai";
+import {
+	completeSimple,
+	isContextOverflow,
+	modelsAreEqual,
+	resetApiProviders,
+	supportsXhigh,
+} from "@mariozechner/pi-ai";
 import { getDocsPath } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
@@ -69,6 +76,7 @@ import {
 } from "./extensions/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
+import { findExactModelReferenceMatch } from "./model-resolver.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.js";
@@ -130,6 +138,48 @@ export type AgentSessionEvent =
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
+
+interface DistilledToolResultMetadata {
+	rawContent?: Array<TextContent | ImageContent>;
+	distillDisplay?: "raw" | "distilled" | "both";
+	distilled?: boolean;
+	distillUsage?: Usage;
+}
+
+type ToolExecutionResultWithMetadata = {
+	content: Array<TextContent | ImageContent>;
+	details?: unknown;
+} & DistilledToolResultMetadata;
+
+function createEmptyUsage(): Usage {
+	return {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			total: 0,
+		},
+	};
+}
+
+function addUsage(target: Usage, usage: Usage): void {
+	target.input += usage.input;
+	target.output += usage.output;
+	target.cacheRead += usage.cacheRead;
+	target.cacheWrite += usage.cacheWrite;
+	target.totalTokens += usage.totalTokens;
+	target.cost.input += usage.cost.input;
+	target.cost.output += usage.cost.output;
+	target.cost.cacheRead += usage.cost.cacheRead;
+	target.cost.cacheWrite += usage.cost.cacheWrite;
+	target.cost.total += usage.cost.total;
+}
 
 // ============================================================================
 // Types
@@ -207,6 +257,14 @@ export interface SessionStats {
 		total: number;
 	};
 	cost: number;
+	distill: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		total: number;
+		cost: number;
+	};
 	contextUsage?: ContextUsage;
 }
 
@@ -295,6 +353,7 @@ export class AgentSession {
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
+	private _distillUsage: Usage = createEmptyUsage();
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -352,6 +411,139 @@ export class AgentSession {
 		);
 	}
 
+	private _resolveDistillModel(modelReference: string | undefined): Model<any> | undefined {
+		if (!modelReference) {
+			return this.model;
+		}
+		const availableModels = this._modelRegistry.getAvailable();
+		return findExactModelReferenceMatch(modelReference, availableModels) ?? this.model;
+	}
+
+	private _buildDistillSystemPromptSection(): string | undefined {
+		const settings = this.settingsManager.getDistillSettings();
+		if (!settings.enabled) {
+			return undefined;
+		}
+
+		const lines = [
+			"## Tool Output Distillation",
+			"",
+			"You can attach `_distill` to any tool call to compress verbose tool output before it returns to the main session context.",
+			"Use it only when the tool output will be large and only a subset of it is needed downstream.",
+			"The tool still executes normally, but you see the distilled result instead of the raw output.",
+			"",
+			'Use `_distill_on_error: true` to distill errors with the same prompt, or `_distill_on_error: "prompt"` to use a separate error-specific prompt.',
+			"Errors default to raw output unless `_distill_on_error` is set.",
+		];
+
+		if (settings.templates.length > 0) {
+			lines.push("", "Examples:");
+			for (const template of settings.templates) {
+				lines.push(`- ${template}`);
+			}
+		}
+
+		return lines.join("\n");
+	}
+
+	private _getDistillableText(content: Array<TextContent | ImageContent>): string | undefined {
+		if (!content.every((part) => part.type === "text")) {
+			return undefined;
+		}
+		return content.map((part) => part.text).join("\n");
+	}
+
+	private async _maybeDistillToolResult(
+		toolCall: AgentToolCall,
+		result: ToolExecutionResultWithMetadata,
+		isError: boolean,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const settings = this.settingsManager.getDistillSettings();
+		if (!settings.enabled) {
+			return;
+		}
+
+		const rawArguments =
+			typeof toolCall.arguments === "object" && toolCall.arguments !== null
+				? (toolCall.arguments as Record<string, unknown>)
+				: undefined;
+		const basePrompt = typeof rawArguments?._distill === "string" ? rawArguments._distill.trim() : "";
+		const distillOnError = rawArguments?._distill_on_error;
+		let prompt: string | undefined;
+
+		if (isError) {
+			if (typeof distillOnError === "string") {
+				prompt = distillOnError.trim();
+			} else if (distillOnError === true) {
+				prompt = basePrompt || settings.errorPrompt;
+			} else {
+				return;
+			}
+		} else {
+			prompt = basePrompt;
+		}
+
+		if (!prompt) {
+			return;
+		}
+
+		const rawText = this._getDistillableText(result.content);
+		if (!rawText || rawText.length < settings.minOutputChars) {
+			return;
+		}
+
+		const model = this._resolveDistillModel(settings.model);
+		if (!model) {
+			return;
+		}
+
+		const maxTokens = Math.min(settings.maxTokens, model.maxTokens ?? settings.maxTokens);
+		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+		const response = await completeSimple(
+			model,
+			{
+				systemPrompt:
+					"You distill tool output for another model. Follow the user-provided instruction exactly. Preserve only information supported by the input. Never invent facts.",
+				messages: [
+					{
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text: `Tool: ${toolCall.name}\n\nInstruction:\n${prompt}\n\nRaw tool output:\n${rawText}`,
+							},
+						],
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{ apiKey, headers, signal, maxTokens },
+		);
+
+		if (response.stopReason === "error" || response.stopReason === "aborted") {
+			return;
+		}
+
+		const distilledContent = response.content.filter((part): part is TextContent => part.type === "text");
+		if (distilledContent.length === 0) {
+			return;
+		}
+
+		result.rawContent = result.content.map((part) => ({ ...part }));
+		result.content = distilledContent;
+		result.distilled = true;
+		result.distillDisplay = settings.display;
+		result.distillUsage = response.usage;
+		this.sessionManager.appendCustomEntry("distill", {
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			model: model.id,
+			rawContent: result.rawContent,
+			usage: response.usage,
+		});
+	}
+
 	/**
 	 * Install tool hooks once on the Agent instance.
 	 *
@@ -384,30 +576,32 @@ export class AgentSession {
 			}
 		};
 
-		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+		this.agent.afterToolCall = async ({ toolCall, args, result, isError }, signal) => {
+			const metadataResult = result as ToolExecutionResultWithMetadata;
 			const runner = this._extensionRunner;
-			if (!runner?.hasHandlers("tool_result")) {
-				return undefined;
+			if (runner?.hasHandlers("tool_result")) {
+				const hookResult = await runner.emitToolResult({
+					type: "tool_result",
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					input: args as Record<string, unknown>,
+					content: metadataResult.content,
+					details: isError ? undefined : metadataResult.details,
+					isError,
+				});
+				if (hookResult && !isError) {
+					metadataResult.content = hookResult.content ?? metadataResult.content;
+					metadataResult.details = hookResult.details ?? metadataResult.details;
+				}
 			}
 
-			const hookResult = await runner.emitToolResult({
-				type: "tool_result",
-				toolName: toolCall.name,
-				toolCallId: toolCall.id,
-				input: args as Record<string, unknown>,
-				content: result.content,
-				details: isError ? undefined : result.details,
-				isError,
-			});
-
-			if (!hookResult || isError) {
-				return undefined;
+			try {
+				await this._maybeDistillToolResult(toolCall, metadataResult, isError, signal);
+			} catch {
+				// Distill failures must not replace a successful tool result with an error.
 			}
 
-			return {
-				content: hookResult.content,
-				details: hookResult.details,
-			};
+			return undefined;
 		};
 	}
 
@@ -509,6 +703,13 @@ export class AgentSession {
 
 		// Notify all listeners
 		this._emit(event);
+
+		if (event.type === "tool_execution_end") {
+			const distillUsage = (event.result as ToolExecutionResultWithMetadata | undefined)?.distillUsage;
+			if (distillUsage) {
+				addUsage(this._distillUsage, distillUsage);
+			}
+		}
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -896,8 +1097,11 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const distillSection = this._buildDistillSystemPromptSection();
+		const appendSections = [...loaderAppendSystemPrompt, distillSection].filter(
+			(section): section is string => typeof section === "string" && section.length > 0,
+		);
+		const appendSystemPrompt = appendSections.length > 0 ? appendSections.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
@@ -2253,14 +2457,15 @@ export class AgentSession {
 				})
 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
 		);
+		const enableDistill = this.settingsManager.getDistillSettings().enabled;
 		const wrappedExtensionTools = this._extensionRunner
-			? wrapRegisteredTools(allCustomTools, this._extensionRunner)
+			? wrapRegisteredTools(allCustomTools, this._extensionRunner, { enableDistill })
 			: [];
 
 		const toolRegistry = new Map(
 			Array.from(this._baseToolDefinitions.values()).map((definition) => [
 				definition.name,
-				wrapToolDefinition(definition),
+				wrapToolDefinition(definition, undefined, { enableDistill }),
 			]),
 		);
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
@@ -2864,11 +3069,11 @@ export class AgentSession {
 		const toolResults = state.messages.filter((m) => m.role === "toolResult").length;
 
 		let toolCalls = 0;
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
+		let totalInput = this._distillUsage.input;
+		let totalOutput = this._distillUsage.output;
+		let totalCacheRead = this._distillUsage.cacheRead;
+		let totalCacheWrite = this._distillUsage.cacheWrite;
+		let totalCost = this._distillUsage.cost.total;
 
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
@@ -2898,6 +3103,14 @@ export class AgentSession {
 				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
 			},
 			cost: totalCost,
+			distill: {
+				input: this._distillUsage.input,
+				output: this._distillUsage.output,
+				cacheRead: this._distillUsage.cacheRead,
+				cacheWrite: this._distillUsage.cacheWrite,
+				total: this._distillUsage.totalTokens,
+				cost: this._distillUsage.cost.total,
+			},
 			contextUsage: this.getContextUsage(),
 		};
 	}

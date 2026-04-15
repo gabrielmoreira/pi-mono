@@ -301,4 +301,35 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("two");
 		expect(rendered).not.toContain("two\n\n");
 	});
+
+	test("shows raw output when distill display is raw", () => {
+		const component = new ToolExecutionComponent("custom_tool", "tool-distill-1", {}, {}, undefined, createFakeTui());
+		component.updateResult({
+			content: [{ type: "text", text: "distilled summary" }],
+			rawContent: [{ type: "text", text: "raw verbose output" }],
+			distilled: true,
+			distillDisplay: "raw",
+			isError: false,
+		});
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("[distilled]");
+		expect(rendered).toContain("raw verbose output");
+		expect(rendered).not.toContain("distilled summary");
+	});
+
+	test("shows distilled and raw output when distill display is both", () => {
+		const component = new ToolExecutionComponent("custom_tool", "tool-distill-2", {}, {}, undefined, createFakeTui());
+		component.updateResult({
+			content: [{ type: "text", text: "distilled summary" }],
+			rawContent: [{ type: "text", text: "raw verbose output" }],
+			distilled: true,
+			distillDisplay: "both",
+			isError: false,
+		});
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("[distilled]");
+		expect(rendered).toContain("distilled summary");
+		expect(rendered).toContain("[raw output]");
+		expect(rendered).toContain("raw verbose output");
+	});
 });

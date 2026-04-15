@@ -6,7 +6,7 @@
  */
 
 import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { wrapToolDefinition } from "../tools/tool-definition-wrapper.js";
+import { type WrapToolDefinitionOptions, wrapToolDefinition } from "../tools/tool-definition-wrapper.js";
 import type { ExtensionRunner } from "./runner.js";
 import type { RegisteredTool } from "./types.js";
 
@@ -14,14 +14,22 @@ import type { RegisteredTool } from "./types.js";
  * Wrap a RegisteredTool into an AgentTool.
  * Uses the runner's createContext() for consistent context across tools and event handlers.
  */
-export function wrapRegisteredTool(registeredTool: RegisteredTool, runner: ExtensionRunner): AgentTool {
-	return wrapToolDefinition(registeredTool.definition, () => runner.createContext());
+export function wrapRegisteredTool(
+	registeredTool: RegisteredTool,
+	runner: ExtensionRunner,
+	options: WrapToolDefinitionOptions = {},
+): AgentTool {
+	return wrapToolDefinition(registeredTool.definition, () => runner.createContext(), options);
 }
 
 /**
  * Wrap all registered tools into AgentTools.
  * Uses the runner's createContext() for consistent context across tools and event handlers.
  */
-export function wrapRegisteredTools(registeredTools: RegisteredTool[], runner: ExtensionRunner): AgentTool[] {
-	return registeredTools.map((rt) => wrapRegisteredTool(rt, runner));
+export function wrapRegisteredTools(
+	registeredTools: RegisteredTool[],
+	runner: ExtensionRunner,
+	options: WrapToolDefinitionOptions = {},
+): AgentTool[] {
+	return registeredTools.map((rt) => wrapRegisteredTool(rt, runner, options));
 }

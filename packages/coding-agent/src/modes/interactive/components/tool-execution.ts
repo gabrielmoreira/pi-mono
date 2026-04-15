@@ -33,6 +33,9 @@ export class ToolExecutionComponent extends Container {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		isError: boolean;
 		details?: any;
+		rawContent?: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+		distillDisplay?: "raw" | "distilled" | "both";
+		distilled?: boolean;
 	};
 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	private hideComponent = false;
@@ -120,6 +123,41 @@ export class ToolExecutionComponent extends Container {
 		return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
 	}
 
+	private isDistilledResult(): boolean {
+		return this.result?.distilled === true && Array.isArray(this.result.rawContent);
+	}
+
+	private getDistillDisplay(): "raw" | "distilled" | "both" {
+		return this.result?.distillDisplay ?? "distilled";
+	}
+
+	private getRawResultView(): typeof this.result | undefined {
+		if (!this.result?.rawContent) {
+			return undefined;
+		}
+		return { ...this.result, content: this.result.rawContent };
+	}
+
+	private getImageBlocksForDisplay(): Array<{ type: string; text?: string; data?: string; mimeType?: string }> {
+		if (!this.result) {
+			return [];
+		}
+		if (!this.isDistilledResult()) {
+			return this.result.content;
+		}
+		const display = this.getDistillDisplay();
+		if (display === "distilled") {
+			return this.result.content;
+		}
+		// In "both" mode we still render raw images only. Distilled tool output is text-only today,
+		// and duplicating image sections would add noise without helping the model-facing summary view.
+		return this.result.rawContent ?? this.result.content;
+	}
+
+	private shouldForceResultFallback(): boolean {
+		return this.isDistilledResult() && this.getDistillDisplay() !== "distilled";
+	}
+
 	private createResultFallback(): Component | undefined {
 		const output = this.getTextOutput();
 		if (!output) {
@@ -150,9 +188,13 @@ export class ToolExecutionComponent extends Container {
 			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 			details?: any;
 			isError: boolean;
+			rawContent?: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+			distillDisplay?: "raw" | "distilled" | "both";
+			distilled?: boolean;
 		},
 		isPartial = false,
 	): void {
+		this.convertedImages.clear();
 		this.result = result;
 		this.isPartial = isPartial;
 		this.updateDisplay();
@@ -164,7 +206,7 @@ export class ToolExecutionComponent extends Container {
 		if (caps.images !== "kitty") return;
 		if (!this.result) return;
 
-		const imageBlocks = this.result.content.filter((c) => c.type === "image");
+		const imageBlocks = this.getImageBlocksForDisplay().filter((c) => c.type === "image");
 		for (let i = 0; i < imageBlocks.length; i++) {
 			const img = imageBlocks[i];
 			if (!img.data || !img.mimeType) continue;
@@ -235,8 +277,12 @@ export class ToolExecutionComponent extends Container {
 			}
 
 			if (this.result) {
+				if (this.isDistilledResult()) {
+					this.contentBox.addChild(new Text(theme.fg("toolTitle", "[distilled]"), 0, 0));
+					hasContent = true;
+				}
 				const resultRenderer = this.getResultRenderer();
-				if (!resultRenderer) {
+				if (!resultRenderer || this.shouldForceResultFallback()) {
 					const component = this.createResultFallback();
 					if (component) {
 						this.contentBox.addChild(component);
@@ -279,7 +325,7 @@ export class ToolExecutionComponent extends Container {
 		this.imageSpacers = [];
 
 		if (this.result) {
-			const imageBlocks = this.result.content.filter((c) => c.type === "image");
+			const imageBlocks = this.getImageBlocksForDisplay().filter((c) => c.type === "image");
 			const caps = getCapabilities();
 			for (let i = 0; i < imageBlocks.length; i++) {
 				const img = imageBlocks[i];
@@ -310,7 +356,31 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private getTextOutput(): string {
-		return getRenderedTextOutput(this.result, this.showImages);
+		if (!this.result) {
+			return "";
+		}
+		if (!this.isDistilledResult()) {
+			return getRenderedTextOutput(this.result, this.showImages);
+		}
+
+		const display = this.getDistillDisplay();
+		const rawResult = this.getRawResultView();
+		const distilledOutput = getRenderedTextOutput(this.result, this.showImages);
+		const rawOutput = rawResult ? getRenderedTextOutput(rawResult, this.showImages) : "";
+
+		if (display === "raw") {
+			return rawOutput;
+		}
+
+		if (display === "both") {
+			const sections = [distilledOutput];
+			if (rawOutput) {
+				sections.push("", "[raw output]", rawOutput);
+			}
+			return sections.filter((section) => section.length > 0).join("\n");
+		}
+
+		return distilledOutput;
 	}
 
 	private formatToolExecution(): string {
@@ -318,6 +388,9 @@ export class ToolExecutionComponent extends Container {
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;
+		}
+		if (this.isDistilledResult()) {
+			text += `\n${theme.fg("toolTitle", "[distilled]")}`;
 		}
 		const output = this.getTextOutput();
 		if (output) {
