@@ -356,4 +356,27 @@ describe("parseArgs", () => {
 			expect(result.messages).toEqual(["Do the task"]);
 		});
 	});
+	describe("--profile flag", () => {
+		test("parses --profile flag", () => {
+			const result = parseArgs(["--profile", "work"]);
+			expect(result.profile).toBe("work");
+		});
+
+		test("parses --profile with empty string value", () => {
+			const result = parseArgs(["--profile", ""]);
+			expect(result.profile).toBe("");
+		});
+
+		test("profile is undefined when not provided", () => {
+			const result = parseArgs(["--help"]);
+			expect(result.profile).toBeUndefined();
+		});
+
+		test("parses --profile alongside other flags", () => {
+			const result = parseArgs(["--profile", "work", "--provider", "openai", "hello"]);
+			expect(result.profile).toBe("work");
+			expect(result.provider).toBe("openai");
+			expect(result.messages).toEqual(["hello"]);
+		});
+	});
 });
